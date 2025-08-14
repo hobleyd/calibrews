@@ -14,11 +14,12 @@ import sys
 import os
 from typing import List, Dict, Any, Optional
 from requests import get
+from OpenSSL import crypto, SSL
 
 # Configuration
 PORT = 10444
-CERT_FILE = os.path.join(os.getenv("SSL_DIR", "/etc/ssl"), os.getenv("SSL_FULLCHAIN",   "fullchain.crt"))               # Path to SSL certificate
-KEY_FILE  = os.path.join(os.getenv("SSL_DIR", "/etc/ssl"), os.getenv("SSL_PRIVATE_KEY", "private.key"))   # Path to SSL private key
+CERT_FILE = os.path.join(os.getenv("SSL_DIR", "/etc/ssl"), os.getenv("SSL_FULLCHAIN",   "fullchain.crt"))
+KEY_FILE  = os.path.join(os.getenv("SSL_DIR", "/etc/ssl"), os.getenv("SSL_PRIVATE_KEY", "private.key"))
 CALIBRE_LIBRARY = os.getenv("CALIBRE_LIBRARY", "/books")
 DATABASE_PATH = os.path.join(CALIBRE_LIBRARY, "metadata.db")
 DEFAULT_LIMIT = 100
@@ -50,15 +51,13 @@ class BookAPIHandler(BaseHTTPRequestHandler):
             if path == "/books":
                 self.handle_books_request(query_params)
             elif path.startswith("/book/"):
-                # Extract UUID from path like /book/{uuid}
-                uuid = path[6:]  # Remove "/book/" prefix
+                uuid = path[6:]
                 self.handle_book_file_request(uuid)
             elif path.startswith("/count/"):
                 last_modified = int(path[7:])
                 self.handle_count_request(last_modified)
             elif path.startswith("/tags/"):
-                # Extract UUID from path like /tags/{uuid}
-                uuid = path[6:]  # Remove "/tags/" prefix
+                uuid = path[6:]
                 self.handle_tags_request(uuid)
             elif path == "/" or path == "/health":
                 self.handle_health_check()
@@ -159,6 +158,7 @@ class BookAPIHandler(BaseHTTPRequestHandler):
             "timestamp": datetime.now().isoformat(),
             "endpoints": {
                 "/books": "GET books with optional parameters: last_modified, limit, offset",
+                "/books": "PUT update Book data in Calibre!",
                 "/book/<uuid>": "GET download EPUB file",
                 "/count/<last_modified>": "GET number of books modified since the specific time (int secs since 1970)",
                 "/tags/<uuid>": "GET tags for book specified by UUID",
@@ -254,17 +254,7 @@ class BookAPIHandler(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')  # CORS support
             self.end_headers()
-            
-            #response = {
-            #    "books": books,
-            #    "count": len(books),
-            #    "parameters": {
-            #        "last_modified": last_modified,
-            #        "limit": limit,
-            #        "offset": offset
-            #    }
-            #}
-            
+
             self.wfile.write(json.dumps(books, indent=2).encode('utf-8'))
             
             logger.info(f"Served {len(books)} books (last_modified>={last_modified}, limit={limit}, offset={offset})")
@@ -325,15 +315,9 @@ class BookAPIHandler(BaseHTTPRequestHandler):
 
         book_count = len(book_list)
 
-        logger.info(f"\n{'='*80}")
-        logger.info(f"📚  BOOK DATA RECEIVED - {timestamp}")
-        logger.info(f"📊  Total Books: {book_count}")
-        logger.info(f"{'='*80}")
-
-        # Print raw JSON first
-        logger.info("RAW JSON:")
-        logger.info(json.dumps(books_data, indent=2))
-        logger.info("")
+        logger.info(f"{book_count} book(s) received - {timestamp}")
+        logger.debug("RAW JSON:")
+        logger.debug(json.dumps(books_data, indent=2))
 
         # Connect to database
         conn = sqlite3.connect(DATABASE_PATH)
@@ -356,7 +340,7 @@ class BookAPIHandler(BaseHTTPRequestHandler):
             UPDATE books SET sort=title_sort(NEW.title)
                          WHERE id=NEW.id AND OLD.title <> NEW.title;
             END;
-            """;
+            """
             cursor.execute(trigger_definition)
 
             # Commit the transaction (if successful)
@@ -386,8 +370,8 @@ class BookAPIHandler(BaseHTTPRequestHandler):
     def process_single_book(self, book_data: Dict[str, Any], book_num: int, total_books: int, cursor):
         """Update the Calibre DB with the updated values."""
         uuid = book_data.get('UUID', 0)
-        is_read = book_data.get('Is_read', False)
 
+        is_read = book_data.get('Is_read', False)
         cursor.execute("""
             INSERT INTO custom_column_3 (book, value)
             VALUES ((SELECT id FROM books WHERE uuid = :uuid), :is_read)
@@ -398,15 +382,17 @@ class BookAPIHandler(BaseHTTPRequestHandler):
         cursor.execute("""
             INSERT INTO custom_column_4 (book, value)
             VALUES ((select id from books where uuid = :uuid), datetime(:last_read, 'unixepoch', 'localtime'))
-            ON CONFLICT (book) DO UPDATE SET value = excluded.value
+            ON CONFLICT (book) DO UPDATE SET value = excluded.value;
         """, {"uuid": uuid, "last_read": last_read})
 
         last_mod = book_data.get('Last_modified', 0)
-        cursor.execute("update books set last_modified = datetime(:last_mod, 'unixepoch', 'localtime') where uuid = :uuid", {"uuid": uuid, "last_mod": last_mod});
+        cursor.execute("""
+            UPDATE books
+               SET set last_modified = datetime(:last_mod, 'unixepoch', 'localtime')
+             WHERE uuid = :uuid;
+        """, {"uuid": uuid, "last_mod": last_mod})
 
     def query_books(self, last_modified: int, limit: int, offset: int) -> List[Dict[str, Any]]:
-        """Query books from the database using the provided SQL."""
-        
         sql_query = """
         select uuid,
                title,
@@ -458,8 +444,8 @@ class BookAPIHandler(BaseHTTPRequestHandler):
             logger.error(f"Database error: {e}")
             raise Exception(f"Database error: {e}")
     
-    def query_book_tags(self, uuid: str) -> List[str]:
-        """Query tags for a specific book from the database using the provided SQL."""
+    def query_book_tags(self, uuid: str):
+        """Query tags for a specific book from the database."""
 
         sql_query = """
         select tags.id, tags.name
@@ -492,9 +478,6 @@ class BookAPIHandler(BaseHTTPRequestHandler):
 
             return tags
 
-        except sqlite3.Error as e:
-            logger.error(f"Database error querying tags for UUID {uuid}: {e}")
-            raise Exception(f"Database error: {e}")
         except Exception as e:
             logger.error(f"Unexpected error querying tags for UUID {uuid}: {e}")
             raise
@@ -522,9 +505,6 @@ class BookAPIHandler(BaseHTTPRequestHandler):
         if row['rating']:
             try:
                 rating = int(row['rating'])
-                # If rating is on scale 1-5, convert to 1-10
-                if rating <= 5:
-                    rating = rating * 2
             except (ValueError, TypeError):
                 rating = 0
         
@@ -573,17 +553,6 @@ def create_ssl_context():
     """Create SSL context for HTTPS server."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     
-    # Check if certificate files exist
-    if not os.path.exists(CERT_FILE):
-        logger.error(f"Certificate file not found: {CERT_FILE}")
-        logger.info(f"\nTo create a self-signed certificate for testing, run:")
-        logger.info(f"openssl req -x509 -newkey rsa:4096 -keyout {KEY_FILE} -out {CERT_FILE} -days 365 -nodes")
-        sys.exit(1)
-    
-    if not os.path.exists(KEY_FILE):
-        logger.error(f"Private key file not found: {KEY_FILE}")
-        sys.exit(1)
-    
     try:
         context.load_cert_chain(CERT_FILE, KEY_FILE)
         logger.info("SSL certificate loaded successfully")
@@ -592,30 +561,59 @@ def create_ssl_context():
         logger.error(f"Failed to load SSL certificate: {e}")
         sys.exit(1)
 
+def create_cert_if_required():
+    global CERT_FILE, KEY_FILE
+    if not os.path.exists(CERT_FILE) or not os.path.exists(KEY_FILE):
+        CERT_FILE='selfsigned.crt'
+        KEY_FILE='private.key'
+
+        k = crypto.PKey()
+        k.generate_key(crypto.TYPE_RSA, 4096)
+
+        cert = crypto.X509()
+        cert.get_subject().C = "CN"
+        cert.get_subject().ST = "ST"
+        cert.get_subject().L = "L"
+        cert.get_subject().O = "O"
+        cert.get_subject().OU = "OU"
+        cert.get_subject().CN = "CN"
+        cert.get_subject().emailAddress = "emailAddress"
+        cert.set_serial_number(0)
+        cert.gmtime_adj_notBefore(0)
+        cert.gmtime_adj_notAfter(10*365*24*60*60)
+        cert.set_issuer(cert.get_subject())
+        cert.set_pubkey(k)
+        cert.sign(k, 'sha512')
+
+        with open(CERT_FILE, "wt") as f:
+            f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, cert).decode("utf-8"))
+        with open(KEY_FILE, "wt") as f:
+            f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, k).decode("utf-8"))
+
+
+def register_with_dns():
+    ip_json = get('https://api64.ipify.org?format=json').text
+
+    # TODO: Integrate with Dynamic DNS service
 
 def main():
     """Main function to start the HTTPS API server."""
-    logger.info(f"🚀 Starting Book API HTTPS server on port {PORT}")
-    logger.info(f"📜 Using certificate: {CERT_FILE}")
-    logger.info(f"🔑 Using private key: {KEY_FILE}")
-    logger.info(f"🗄️  Using database: {DATABASE_PATH}")
-    
+    logger.info(f"🚀 Starting Calibre API HTTPS server on port {PORT}")
+
     # Check if database exists
     if not os.path.exists(DATABASE_PATH):
         logger.error(f"Database file not found: {DATABASE_PATH}")
-        sys.exit(1)
-    
-    # Check if running as root (required for port 443)
-    if PORT < 1024 and os.geteuid() != 0:
-        logger.error(f"Port {PORT} requires root privileges. Run with sudo or use a port > 1024")
-        sys.exit(1)
+        #sys.exit(1)
 
-    ip = get('https://api.ipify.org').text
+    if len(os.getenv("DYNU_API", "")) > 0:
+        register_with_dns()
+
     try:
         # Create HTTP server
         httpd = HTTPServer(('', PORT), BookAPIHandler)
         
         # Create and apply SSL context
+        create_cert_if_required()
         ssl_context = create_ssl_context()
         httpd.socket = ssl_context.wrap_socket(httpd.socket, server_side=True)
         
@@ -627,6 +625,7 @@ def main():
         logger.info(f"   GET /count/last_modified - Get number of books")
         logger.info(f"   GET /tags/<uuid> - Get tags for book")
         logger.info(f"   GET /health")
+        logger.info(f"   PUT /books")
         logger.info("🔍 Use Ctrl+C to stop the server\n")
         
         # Start serving
@@ -637,7 +636,6 @@ def main():
         logger.info("\n👋 Server stopped")
     except PermissionError:
         logger.error(f"Permission denied. Port {PORT} requires root privileges.")
-        logger.info(f"Run with: sudo python3 {sys.argv[0]}")
         sys.exit(1)
     except Exception as e:
         logger.error(f"Server error: {e}")
