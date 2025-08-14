@@ -41,7 +41,7 @@ jobs:
 
     - name: Build executable (Ubuntu/macOS)
       run: |
-        pyinstaller --onefile --name ${{ matrix.artifact_name }} main.py
+        pyinstaller --onefile --name ${{ matrix.artifact_name }} calibrews.py
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
