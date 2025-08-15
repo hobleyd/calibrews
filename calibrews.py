@@ -594,6 +594,7 @@ def create_cert_if_required():
 
 def register_with_dns():
     ip_json = json.loads(requests.get('https://api64.ipify.org?format=json').text)
+    external_ip = ip_json['ip']
     dynu_api = os.getenv('DYNU_API')
     try:
         dynu_domain = json.loads(requests.get(
@@ -604,22 +605,24 @@ def register_with_dns():
             },
         ).text)
 
-        dynuId = dynu_domain['domains'][0]['id']
-        dynuFQDN = dynu_domain['domains'][0]['name']
-        requests.post(
-            f"https://api.dynu.com/v2/dns/{dynuId}",
-            headers={
-                "accept": "application/json",
-                "API-Key": dynu_api,
-                "Content-Type": "application/json"
-            },
-            json={
-                "name": dynuFQDN,
-                "ipv4Address": ip_json['ip'],
-                "ipv4": True
-            }
-        )
-        logger.info(f'Successfully updated {dynuFQDN} to {ip_json['ip']}')
+        dynu_id   = dynu_domain['domains'][0]['id']
+        dynu_fqdn = dynu_domain['domains'][0]['name']
+        old_ip    = dynu_domain['domains'][0]['ipv4Address']
+        if old_ip != external_ip:
+            requests.post(
+                f"https://api.dynu.com/v2/dns/{dynu_id}",
+                headers={
+                    "accept": "application/json",
+                    "API-Key": dynu_api,
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "name": dynu_fqdn,
+                    "ipv4Address": external_ip,
+                    "ipv4": True
+                }
+            )
+            logger.info(f'Successfully updated {dynu_fqdn} to {external_ip}')
 
     except ValueError as e:
         logger.error(f"Invalid input: {e}")
