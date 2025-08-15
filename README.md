@@ -6,7 +6,7 @@ It is written for [Paladin](https://github.com/hobleyd/paladin), an Android laun
 You can install it using Docker, or run it on the command line.
 
 In order to access it remotely, you will need either need to point your own domain to your server, or,
-if that makes no sense to you, configure an account with [Dynu](https://www.dynu.com) and follow the instructions below.
+if you don't have your own domain, configure an account with [Dynu](https://www.dynu.com) and follow the instructions below.
 
 1. Register for an account
 2. Get the API key (Control Panel -> API Credentials) [here](https://www.dynu.com/en-US/ControlPanel/APICredentials)
@@ -17,7 +17,7 @@ if that makes no sense to you, configure an account with [Dynu](https://www.dynu
    4. Docker: I assume you know how to do this, if you understand Docker.
 
 If you can provide your own SSL certificate, use environment variables for SSL_DIR, SSL_FULLCHAIN and SSL_PRIVATE_KEY to point to the
-folder and the relevant files accordingly. See the .bat, ps1 or .sh files for an example. If you don't want to provide your own, the
+folder and the relevant files accordingly. See the .bat, .ps1 or .sh files for an example. If you don't want to provide your own, the
 service will create a self-signed certificate and use that. Paladin won't enforce the fact that this is not fully signed which is
 slightly less secure, but given this is designed for a single person to use, I don't consider that a major issue.
 
