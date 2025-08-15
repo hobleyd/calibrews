@@ -4,22 +4,24 @@ HTTPS API server to serve book data from a Calibre SQLite database
 """
 
 import json
-import ssl
+import ipaddress
 import logging
-import sqlite3
-import urllib.parse
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime
-import sys
 import os
+import requests
+import sqlite3
+import ssl
+import sys
+import urllib.parse
+
+from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from OpenSSL import crypto
 from typing import List, Dict, Any, Optional
-from requests import get
-from OpenSSL import crypto, SSL
 
 # Configuration
 PORT = 10444
 CERT_FILE = os.path.join(os.getenv("SSL_DIR", "/etc/ssl"), os.getenv("SSL_FULLCHAIN",   "fullchain.crt"))
-KEY_FILE  = os.path.join(os.getenv("SSL_DIR", "/etc/ssl"), os.getenv("SSL_PRIVATE_KEY", "private.key"))
+KEY_FILE  = os.path.join(os.getenv("SSL_DIR", "/etc/ssl"), os.getenv("SSL_PRIVATE_KEY", "private/private.key"))
 CALIBRE_LIBRARY = os.getenv("CALIBRE_LIBRARY", "/books")
 DATABASE_PATH = os.path.join(CALIBRE_LIBRARY, "metadata.db")
 DEFAULT_LIMIT = 100
@@ -31,7 +33,6 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
 
 class BookAPIHandler(BaseHTTPRequestHandler):
     """HTTP request handler for book API."""
@@ -592,15 +593,42 @@ def create_cert_if_required():
 
 
 def register_with_dns():
-    ip_json = get('https://api64.ipify.org?format=json').text
+    ip_json = json.loads(requests.get('https://api64.ipify.org?format=json').text)
+    dynu_api = os.getenv('DYNU_API')
+    try:
+        dynu_domain = json.loads(requests.get(
+            "https://api.dynu.com/v2/dns",
+            headers={
+                "accept": "application/json",
+                "API-Key": dynu_api,
+            },
+        ).text)
 
-    # TODO: Integrate with Dynamic DNS service
+        dynuId = dynu_domain['domains'][0]['id']
+        dynuFQDN = dynu_domain['domains'][0]['name']
+        requests.post(
+            f"https://api.dynu.com/v2/dns/{dynuId}",
+            headers={
+                "accept": "application/json",
+                "API-Key": dynu_api,
+                "Content-Type": "application/json"
+            },
+            json={
+                "name": dynuFQDN,
+                "ipv4Address": ip_json['ip'],
+                "ipv4": True
+            }
+        )
+        logger.info(f'Successfully updated {dynuFQDN} to {ip_json['ip']}')
+
+    except ValueError as e:
+        logger.error(f"Invalid input: {e}")
+    except requests.RequestException as e:
+        logger.error(f"API request failed: {e}")
 
 def main():
-    """Main function to start the HTTPS API server."""
     logger.info(f"🚀 Starting Calibre API HTTPS server on port {PORT}")
 
-    # Check if database exists
     if not os.path.exists(DATABASE_PATH):
         logger.error(f"Database file not found: {DATABASE_PATH}")
         #sys.exit(1)
