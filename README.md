@@ -5,16 +5,12 @@ It is written for [Paladin](https://github.com/hobleyd/paladin), an Android laun
 
 You can install it using Docker, or run it on the command line.
 
-In order to access it remotely, you will need either need to point your own domain to your server, or,
-if you don't have your own domain, configure an account with [Dynu](https://www.dynu.com) and follow the instructions below.
+If you run it on the command line, Paladin will discover the service running and connect to it if both devices
+are running on the same network.
 
-1. Register for an account
-2. Get the API key (Control Panel -> API Credentials) [here](https://www.dynu.com/en-US/ControlPanel/APICredentials)
-3. Set an environment variable called DYNU_API="API Key"
-   1. Windows: Edit the calibrews.bat or calibrews.ps1 script and add it in.
-   2. MacOS: Edit the calibrews.sh script and add it in.
-   3. Linux: Edit the calibrews.sh script and add it in.
-   4. Docker: I assume you know how to do this, if you understand Docker.
+In order to access it remotely, you will need to configure a Cloudflare tunnel, to allow Paladin to hit .
+https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+cloudflared tunnel login
 
 If you can provide your own SSL certificate, use environment variables for SSL_DIR, SSL_FULLCHAIN and SSL_PRIVATE_KEY to point to the
 folder and the relevant files accordingly. See the .bat, .ps1 or .sh files for an example. If you don't want to provide your own, the
@@ -33,7 +29,7 @@ The API supports the following actions:
 
 /books will show all books modified since the last timestamp (# seconds since the Unix epoch)
 /book/uuid will download a specific book to your device
-/count/last_modified will show a count of all books channged since the last timestamp
+/count/last_modified will show a count of all books changed since the last timestamp
 /tags/uuid will get the tags for a specific book
 /health will show whether the service is running or not.
 PUT /books will allow you to update the last read, last modified or rating.

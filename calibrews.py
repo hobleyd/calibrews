@@ -8,6 +8,7 @@ import ipaddress
 import logging
 import os
 import requests
+import socket
 import sqlite3
 import ssl
 import sys
@@ -17,6 +18,7 @@ from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from OpenSSL import crypto
 from typing import List, Dict, Any, Optional
+from zeroconf import ServiceInfo, Zeroconf
 
 # Configuration
 PORT = 10444
@@ -29,7 +31,7 @@ MAX_LIMIT = 1000
 
 # Set up logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -55,15 +57,16 @@ class BookAPIHandler(BaseHTTPRequestHandler):
                 uuid = path[6:]
                 self.handle_book_file_request(uuid)
             elif path.startswith("/count/"):
-                last_modified = int(path[7:])
-                self.handle_count_request(last_modified)
+                [last_modified, limit] = path[7:].split('/')
+                logger.debug(f'last_modified: !{last_modified}/{limit}!')
+                self.handle_count_request(int(last_modified), int(limit))
             elif path.startswith("/tags/"):
                 uuid = path[6:]
                 self.handle_tags_request(uuid)
             elif path == "/" or path == "/health":
                 self.handle_health_check()
             else:
-                self.send_error(404, "Not Found")
+                self.send_error(404, f"{path} Not Found with {query_params}")
                 
         except Exception as e:
             logger.error(f"Error processing GET request: {e}")
@@ -113,7 +116,7 @@ class BookAPIHandler(BaseHTTPRequestHandler):
             conn = sqlite3.connect(DATABASE_PATH)
             cursor = conn.cursor()
 
-            cursor.execute("SELECT path || '/' || name || '.' || LOWER(format) FROM books JOIN data ON books.id = data.book WHERE uuid = ?", (uuid,))
+            cursor.execute("SELECT path || '/' || name || '.' || LOWER(format) FROM books JOIN data ON books.id = data.book WHERE format = 'epub' and uuid = ?", (uuid,))
             row = cursor.fetchone()
 
             conn.close()
@@ -126,7 +129,7 @@ class BookAPIHandler(BaseHTTPRequestHandler):
             logger.warning(f"Could not get book path for UUID {uuid}: {e}")
             return None
 
-    def handle_count_request(self, last_modified: int):
+    def handle_count_request(self, last_modified: int, limit: int):
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
         self.send_header('Cache-Control', 'no-cache')
@@ -136,15 +139,32 @@ class BookAPIHandler(BaseHTTPRequestHandler):
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        cursor.execute("SELECT count(*) as count FROM books where datetime(last_modified, 'localtime') >= datetime(?, 'unixepoch')", (last_modified,))
-        row = cursor.fetchone()
+        cursor.execute("""
+            SELECT title, author_sort, unixepoch(last_modified) as last_modified, COUNT(*) OVER() AS count
+              FROM books
+             WHERE datetime(last_modified, 'localtime') >= datetime(?, 'unixepoch')
+             ORDER BY unixepoch(last_modified) DESC
+             LIMIT ?
+             """, (last_modified, limit))
+        rows = cursor.fetchall()
 
+        response = {'count': 0, 'book': []}
+        if len(rows) > 0:
+            books = []
+            for row in rows:
+                books.append({
+                    'title': row['title'],
+                    'author': row['author_sort'],
+                    'last_modified': int(row['last_modified'])
+                })
+
+            response = {
+                'count': int(rows[0]['count']),
+                'books': books,
+            }
         conn.close()
 
-        response = {
-                'count': row['count'],
-        }
-            
+        logger.debug(f"returning the count object: {response}")
         self.wfile.write(json.dumps(response, indent=2).encode('utf-8'))
 
     def handle_health_check(self):
@@ -331,6 +351,7 @@ class BookAPIHandler(BaseHTTPRequestHandler):
 
             # Process each book!
             for i, book_data in enumerate(book_list, 1):
+                logger.debug(f"processing {book_data}")
                 self.process_single_book(book_data, i, book_count, cursor)
 
             # Recreate the trigger
@@ -372,6 +393,7 @@ class BookAPIHandler(BaseHTTPRequestHandler):
         """Update the Calibre DB with the updated values."""
         uuid = book_data.get('UUID', 0)
 
+        logger.debug('process_single_book: Is_Read')
         is_read = book_data.get('Is_read', False)
         cursor.execute("""
             INSERT INTO custom_column_3 (book, value)
@@ -379,6 +401,7 @@ class BookAPIHandler(BaseHTTPRequestHandler):
             ON CONFLICT (book) DO UPDATE SET value = excluded.value;
         """, {"uuid": uuid, "is_read": is_read})
 
+        logger.debug('process_single_book: Last_read')
         last_read = book_data.get('Last_read', 0)
         cursor.execute("""
             INSERT INTO custom_column_4 (book, value)
@@ -386,10 +409,18 @@ class BookAPIHandler(BaseHTTPRequestHandler):
             ON CONFLICT (book) DO UPDATE SET value = excluded.value;
         """, {"uuid": uuid, "last_read": last_read})
 
+        logger.debug('process_single_book: Future Reads')
+        cursor.execute("""
+            DELETE from books_tags_link
+            WHERE book in (select id from books where uuid = :uuid)
+              AND tag in (select id from tags where name = 'Future Reads');
+        """, {"uuid": uuid})
+
+        logger.debug('process_single_book: Last_modified')
         last_mod = book_data.get('Last_modified', 0)
         cursor.execute("""
             UPDATE books
-               SET set last_modified = datetime(:last_mod, 'unixepoch', 'localtime')
+               SET last_modified = datetime(:last_mod, 'unixepoch', 'localtime')
              WHERE uuid = :uuid;
         """, {"uuid": uuid, "last_mod": last_mod})
 
@@ -536,7 +567,7 @@ class BookAPIHandler(BaseHTTPRequestHandler):
             "Last_read": last_read,
             "Last_modified": last_mod,
             "Blurb": row['blurb'] or '',
-            "Tags": []  # Empty array as no tags in this query
+            "Tags": self.query_book_tags(row['uuid'])
         }
         
         return book_json
@@ -591,43 +622,41 @@ def create_cert_if_required():
         with open(KEY_FILE, "wt") as f:
             f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, k).decode("utf-8"))
 
-
-def register_with_dns():
-    ip_json = json.loads(requests.get('https://api64.ipify.org?format=json').text)
-    external_ip = ip_json['ip']
-    dynu_api = os.getenv('DYNU_API')
+def get_local_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(0)
     try:
-        dynu_domain = json.loads(requests.get(
-            "https://api.dynu.com/v2/dns",
-            headers={
-                "accept": "application/json",
-                "API-Key": dynu_api,
-            },
-        ).text)
+        # doesn't even have to be reachable
+        s.connect(('10.254.254.254', 1))
+        IP = s.getsockname()[0]
+    except Exception:
+        IP = '127.0.0.1'
+    finally:
+        s.close()
+    logger.info(f'got IP address: {IP}')
+    return IP
 
-        dynu_id   = dynu_domain['domains'][0]['id']
-        dynu_fqdn = dynu_domain['domains'][0]['name']
-        old_ip    = dynu_domain['domains'][0]['ipv4Address']
-        if old_ip != external_ip:
-            requests.post(
-                f"https://api.dynu.com/v2/dns/{dynu_id}",
-                headers={
-                    "accept": "application/json",
-                    "API-Key": dynu_api,
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "name": dynu_fqdn,
-                    "ipv4Address": external_ip,
-                    "ipv4": True
-                }
-            )
-            logger.info(f'Successfully updated {dynu_fqdn} to {external_ip}')
+def register_service(service_name, port, service_type="_http._tcp.local."):
+    """Register service with Zeroconf"""
+    zeroconf = Zeroconf()
 
-    except ValueError as e:
-        logger.error(f"Invalid input: {e}")
-    except requests.RequestException as e:
-        logger.error(f"API request failed: {e}")
+    ip_addr = get_local_ip()
+    info = ServiceInfo(
+        service_type,
+        f"{service_name}.{service_type}",
+        addresses=[socket.inet_aton(ip_addr)],
+        port=port,
+        properties={
+            'description': 'Calibre Web Service',
+            'version': '1.0',
+            'server': ip_addr,
+            'port': PORT
+        }
+    )
+
+    zeroconf.register_service(info)
+    logging.info(f"Service registered as {info}")
+    return zeroconf, info
 
 def main():
     logger.info(f"🚀 Starting Calibre API HTTPS server on port {PORT}")
@@ -636,9 +665,7 @@ def main():
         logger.error(f"Database file not found: {DATABASE_PATH}")
         #sys.exit(1)
 
-    if len(os.getenv("DYNU_API", "")) > 0:
-        register_with_dns()
-
+    zeroconf, service_info = register_service("calibre-service", PORT)
     try:
         # Create HTTP server
         httpd = HTTPServer(('', PORT), BookAPIHandler)
@@ -671,8 +698,11 @@ def main():
     except Exception as e:
         logger.error(f"Server error: {e}")
         sys.exit(1)
-
+    finally:
+        zeroconf.unregister_service(service_info)
+        zeroconf.close()
 
 if __name__ == "__main__":
     main()
+    # TODO: exit when IP address changes.
 
