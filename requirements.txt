@@ -1,2 +1,3 @@
 requests>=2.32.4
 pyopenssl>=25.1.0
+zeroconf>=0.147.0
