@@ -556,12 +556,15 @@ class BookAPIHandler(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 series_index = 0.0
         
+        authors = row['author'].split('&')
+        authors = [{'name': author.strip()} for author in authors]
+
         book_json = {
             "UUID": row['uuid'] or '',
             "Title": row['title'] or '',
-            "Series": row['series'] or '',
+            "Series": { 'series': row['series'] or ''},
             "Series_index": series_index,
-            "Author": row['author'] or '',
+            "Author": authors or [],
             "Rating": rating,
             "Is_read": is_read,
             "Last_read": last_read,
