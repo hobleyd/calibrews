@@ -48,11 +48,15 @@ class BookAPIHandler(BaseHTTPRequestHandler):
         try:
             # Parse URL and query parameters
             parsed_path = urllib.parse.urlparse(self.path)
-            path = parsed_path.path
             query_params = urllib.parse.parse_qs(parsed_path.query)
-            
+            path = parsed_path.path
+
+            logger.debug(f'path: {path}')
+
             if path == "/books":
                 self.handle_books_request(query_params)
+            elif path == "/library":
+                self.handle_library_request()
             elif path.startswith("/book/"):
                 uuid = path[6:]
                 self.handle_book_file_request(uuid)
@@ -60,6 +64,9 @@ class BookAPIHandler(BaseHTTPRequestHandler):
                 [last_modified, limit] = path[7:].split('/')
                 logger.debug(f'last_modified: !{last_modified}/{limit}!')
                 self.handle_count_request(int(last_modified), int(limit))
+            elif path.startswith("/details/"):
+                uuid = path[9:]
+                self.handle_details_request(uuid)
             elif path.startswith("/tags/"):
                 uuid = path[6:]
                 self.handle_tags_request(uuid)
@@ -182,7 +189,9 @@ class BookAPIHandler(BaseHTTPRequestHandler):
                 "/books": "PUT update Book data in Calibre!",
                 "/book/<uuid>": "GET download EPUB file",
                 "/count/<last_modified>": "GET number of books modified since the specific time (int secs since 1970)",
+                "/library": "GET complete set of UUIDS in the library",
                 "/tags/<uuid>": "GET tags for book specified by UUID",
+                "/uuid/<uuid>": "GET Book by UUID",
                 "/health": "Get this message"
             }
         }
@@ -287,6 +296,44 @@ class BookAPIHandler(BaseHTTPRequestHandler):
             logger.error(f"Error handling books request: {e}")
             self.send_error(500, f"Internal server error: {e}")
     
+    def handle_details_request(self, uuid: str):
+        """Return a book for the specified UUID"""
+        try:
+            # Query database for tags
+            response = self.query_book(uuid)
+
+            # Send response
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')  # CORS support
+            self.end_headers()
+
+            self.wfile.write(json.dumps(response, indent=2).encode('utf-8'))
+
+            logger.info(f"Served book UUID: {uuid}")
+        except Exception as e:
+            logger.error(f"Error handling uuid request for UUID {uuid}: {e}")
+            self.send_error(500, f"Internal server error: {e}")
+
+    def handle_library_request(self):
+        """Return a list of UUIDs comprising all books in the library"""
+        try:
+            # Query database for tags
+            response = self.query_book_uuids()
+
+            # Send response
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')  # CORS support
+            self.end_headers()
+
+            self.wfile.write(json.dumps(response, indent=2).encode('utf-8'))
+
+            logger.info(f"Served {len(response)} uuids")
+        except Exception as e:
+            logger.error(f"Error handling library request: {e}")
+            self.send_error(500, f"Internal server error: {e}")
+
     def handle_tags_request(self, uuid: str):
         """Handle /tags/{uuid} endpoint to get tags for a book."""
         try:
@@ -297,9 +344,6 @@ class BookAPIHandler(BaseHTTPRequestHandler):
 
             # Sanitize UUID
             uuid = uuid.strip()
-            if '..' in uuid or '/' in uuid or '\\' in uuid:
-                self.send_error(400, "Invalid UUID format")
-                return
 
             # Query database for tags
             response = self.query_book_tags(uuid)
@@ -424,6 +468,53 @@ class BookAPIHandler(BaseHTTPRequestHandler):
              WHERE uuid = :uuid;
         """, {"uuid": uuid, "last_mod": last_mod})
 
+    def query_book(self, uuid: str):
+        sql_query = """
+        select uuid,
+               title,
+               coalesce(s.sort, "") as series,
+               coalesce(series_index, 0) as series_index,
+               author_sort as author,
+               coalesce(r.rating, 0) as rating,
+               coalesce(cc3.value, 0) as is_read,
+               coalesce(strftime('%s', cc4.value), 0) as last_read,
+               strftime('%s', last_modified, 'localtime') as last_mod,
+               coalesce(c.text, "") as blurb
+        from books
+        left join custom_column_3 cc3
+               on cc3.book = books.id
+        left join custom_column_4 cc4
+               on cc4.book = books.id
+        left join books_series_link bsl
+               on bsl.book = books.id
+        left join series s
+               on s.id = bsl.series
+        left join comments c
+               on c.book = books.id
+        left join books_ratings_link brl
+               on brl.book = books.id
+        left join ratings r
+               on r.id = brl.id
+        where uuid = ?
+        """
+
+        try:
+            conn = sqlite3.connect(DATABASE_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            # Execute query with parameters
+            cursor.execute(sql_query, (uuid,))
+            row = cursor.fetchone()
+            book = self.convert_row_to_book_json(row)
+            conn.close()
+
+            return book
+
+        except sqlite3.Error as e:
+            logger.error(f"Database error: {e}")
+            raise Exception(f"Database error: {e}")
+
     def query_books(self, last_modified: int, limit: int, offset: int) -> List[Dict[str, Any]]:
         sql_query = """
         select uuid,
@@ -475,7 +566,36 @@ class BookAPIHandler(BaseHTTPRequestHandler):
         except sqlite3.Error as e:
             logger.error(f"Database error: {e}")
             raise Exception(f"Database error: {e}")
-    
+
+    def query_book_uuids(self):
+        """Return a complete list of UUIDs in the library"""
+        sql_query = """
+        select uuid from books order by last_modified desc;
+        """
+
+        try:
+            conn = sqlite3.connect(DATABASE_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            # Execute query with UUID parameter
+            cursor.execute(sql_query)
+            rows = cursor.fetchall()
+
+            # Extract tag names
+            uuids = []
+            for row in rows:
+                uuids.append({'uuid' : row['uuid']})
+
+            logger.debug(uuids)
+            conn.close()
+
+            return uuids
+
+        except Exception as e:
+            logger.error(f"Unexpected error querying tags for UUID {uuid}: {e}")
+            raise
+
     def query_book_tags(self, uuid: str):
         """Query tags for a specific book from the database."""
 
@@ -668,8 +788,9 @@ def main():
         logger.error(f"Database file not found: {DATABASE_PATH}")
         #sys.exit(1)
 
-    zeroconf, service_info = register_service("calibre-service", PORT)
     try:
+        zeroconf, service_info = register_service("calibre-service", PORT)
+
         # Create HTTP server
         httpd = HTTPServer(('', PORT), BookAPIHandler)
         
@@ -684,6 +805,8 @@ def main():
         logger.info(f"   GET /books?last_modified=<timestamp>&limit=<num>&offset=<num>")
         logger.info(f"   GET /book/<uuid>  - Download EPUB file")
         logger.info(f"   GET /count/last_modified - Get number of books")
+        logger.info(f"   GET /details/<uuid>  - Get Book details")
+        logger.info(f"   GET /library  - Get complete set of UUIDs in the library")
         logger.info(f"   GET /tags/<uuid> - Get tags for book")
         logger.info(f"   GET /health")
         logger.info(f"   PUT /books")
