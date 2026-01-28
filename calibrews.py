@@ -146,13 +146,25 @@ class BookAPIHandler(BaseHTTPRequestHandler):
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
+#          SELECT title, author_sort, last_modified, COUNT(*) OVER() AS count
+#          FROM (
+#          )
         cursor.execute("""
-            SELECT title, author_sort, unixepoch(last_modified) as last_modified, COUNT(*) OVER() AS count
-              FROM books
-             WHERE datetime(last_modified, 'localtime') >= datetime(?, 'unixepoch')
-             ORDER BY unixepoch(last_modified) DESC
-             LIMIT ?
-             """, (last_modified, limit))
+              SELECT DISTINCT b.title, b.author_sort, unixepoch(b.last_modified) as last_modified, COUNT(*) OVER() AS count
+                FROM books b
+           LEFT JOIN custom_column_4 cc ON b.id = cc.book
+               WHERE datetime(last_modified, 'localtime') >= datetime(?, 'unixepoch')
+                  OR datetime(value, 'localtime') >= datetime(?, 'unixepoch')
+            ORDER BY unixepoch(last_modified) DESC
+               LIMIT ?
+         """, (last_modified, last_modified, limit))
+#        cursor.execute("""
+#            SELECT title, author_sort, unixepoch(last_modified) as last_modified, COUNT(*) OVER() AS count
+#              FROM books
+#             WHERE datetime(last_modified, 'localtime') >= datetime(?, 'unixepoch')
+#             ORDER BY unixepoch(last_modified) DESC
+#             LIMIT ?
+#             """, (last_modified, limit))
         rows = cursor.fetchall()
 
         response = {'count': 0, 'book': []}
@@ -543,6 +555,7 @@ class BookAPIHandler(BaseHTTPRequestHandler):
         left join ratings r
                on r.id = brl.id
         where datetime(last_modified, 'localtime') >= datetime(?, 'unixepoch')
+           or datetime(cc4.value, 'localtime') >= datetime(?, 'unixepoch')
         limit ? offset ?
         """
         
@@ -552,7 +565,7 @@ class BookAPIHandler(BaseHTTPRequestHandler):
             cursor = conn.cursor()
             
             # Execute query with parameters
-            cursor.execute(sql_query, (last_modified, limit, offset))
+            cursor.execute(sql_query, (last_modified, last_modified, limit, offset))
             rows = cursor.fetchall()
             
             books = []
@@ -587,7 +600,7 @@ class BookAPIHandler(BaseHTTPRequestHandler):
             for row in rows:
                 uuids.append({'uuid' : row['uuid']})
 
-            logger.debug(uuids)
+            #logger.debug(uuids)
             conn.close()
 
             return uuids
